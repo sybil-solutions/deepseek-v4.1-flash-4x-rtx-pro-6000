@@ -1,0 +1,267 @@
+{
+ "passed": true,
+ "date": "2026-10-17",
+ "change": "adapter/row_store.cpp: each lookup deduplicates its cache misses and reads them with Linux native AIO (DSV41_ENGRAM_IO_DEPTH=64 in flight); owned scale rows stay resident inside the cache budget (DSV41_ENGRAM_RESIDENT_SCALES=1), so a miss is one 4 KiB direct read instead of two serial ones.",
+ "host": {
+  "gpus": "4 x RTX PRO 6000 Blackwell 96 GB, PCIe, no NVLink",
+  "gpu_power_limit_w": 350,
+  "cpu": "Threadripper PRO 9975WX (32 cores)",
+  "ram_gib": 125,
+  "nvme": "Samsung 990 PRO 2TB (PCIe 4.0), ext4",
+  "kernel": "7.0.0-34-generic",
+  "container_seccomp": "Docker default profile (unchanged)"
+ },
+ "checkpoint": {
+  "repo": "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+  "revision": "1bae0e1088993b9b82de08f59de5be5a34e42170"
+ },
+ "launch": {
+  "OFFLOAD_MODE": "nvme",
+  "DSV41_CACHE_GIB": 64,
+  "CONTEXT_LENGTH": 1048576,
+  "MAX_TOTAL_TOKENS": 2000000,
+  "MEMORY_FRACTION": 0.85,
+  "MAX_RUNNING_REQUESTS": 8,
+  "CHUNKED_PREFILL_SIZE": 2048,
+  "dspark_block": 5
+ },
+ "images": {
+  "original": "sha256:54f07d22817ed7b9705bce9b05017277b8e1f1a4118a0b6028a2760d57a0018f",
+  "parallel": "sha256:abd7dce6f92469f41a1fe413c848517cd73b4e5deaad941c99e994183eb59157",
+  "note": "identical build context except adapter/row_store.cpp and tests/"
+ },
+ "byte_parity": {
+  "fixture": "tests/test_row_store.py: 11 cases (read depth 1 and 64, budgets 0 / 17 rows / all rows, ownership range with and without resident scales, 4 concurrent callers, unaligned offsets); also passes with OFFLOAD_MODE=ram",
+  "checkpoint": {
+   "test": "tests/test_row_store_checkpoint.py",
+   "row_checks": 41016,
+   "layers": [
+    1,
+    14
+   ],
+   "tp_ranks": 4,
+   "budget_bytes": 8589934592,
+   "cold_lookup_ms_per_store": {
+    "original": [
+     253.7,
+     252.2,
+     253.4,
+     254.0,
+     207.2,
+     206.5,
+     205.1,
+     200.4
+    ],
+    "parallel": [
+     9.0,
+     8.4,
+     9.1,
+     8.7,
+     8.8,
+     8.8,
+     8.2,
+     8.6
+    ]
+   },
+   "nvme_reads_per_store": {
+    "original": [
+     4240,
+     4204,
+     4208,
+     4264,
+     4246,
+     4230,
+     4214,
+     4250
+    ],
+    "parallel": [
+     2120,
+     2102,
+     2104,
+     2132,
+     2123,
+     2115,
+     2107,
+     2125
+    ]
+   },
+   "note": "single process, ~2,100 distinct missing rows per store; both libraries pass"
+  }
+ },
+ "drive_random_4k_direct_reads_per_s": {
+  "engine": "4 processes, Linux native AIO, read-only on the layer-1 shard",
+  "in_flight_per_process": {
+   "1": 66429,
+   "16": 789234,
+   "32": 1131951,
+   "64": 1301319
+  }
+ },
+ "prefill": {
+  "protocol": "Each arm freshly restarted (empty row cache), then the same request sequence. Each text is sent once (cold rows), then again behind a new leading nonce so the prefix cache cannot reuse KV but the row cache is warm. max_tokens 1; client wall time. Texts: CPython 3.12 stdlib source (three disjoint slices) and seeded random dictionary words. One repetition per arm.",
+  "cases": [
+   {
+    "text": "code",
+    "row_cache": "cold",
+    "prompt_tokens": 25713,
+    "original_s": 25.75,
+    "parallel_s": 6.55,
+    "original_tok_s": 999,
+    "parallel_tok_s": 3925,
+    "speedup": 3.93,
+    "original_nvme_reads": 1340807,
+    "parallel_nvme_reads": 868790,
+    "original_gpu_util_pct": 24,
+    "parallel_gpu_util_pct": 44
+   },
+   {
+    "text": "code",
+    "row_cache": "warm",
+    "prompt_tokens": 25713,
+    "original_s": 2.79,
+    "parallel_s": 2.78,
+    "original_tok_s": 9227,
+    "parallel_tok_s": 9260,
+    "speedup": 1.0,
+    "original_nvme_reads": 3677,
+    "parallel_nvme_reads": 2404,
+    "original_gpu_util_pct": 87,
+    "parallel_gpu_util_pct": 88
+   },
+   {
+    "text": "code2",
+    "row_cache": "cold",
+    "prompt_tokens": 24838,
+    "original_s": 23.9,
+    "parallel_s": 4.77,
+    "original_tok_s": 1039,
+    "parallel_tok_s": 5205,
+    "speedup": 5.01,
+    "original_nvme_reads": 1176981,
+    "parallel_nvme_reads": 693357,
+    "original_gpu_util_pct": 25,
+    "parallel_gpu_util_pct": 60
+   },
+   {
+    "text": "code2",
+    "row_cache": "warm",
+    "prompt_tokens": 24838,
+    "original_s": 2.75,
+    "parallel_s": 2.71,
+    "original_tok_s": 9040,
+    "parallel_tok_s": 9153,
+    "speedup": 1.01,
+    "original_nvme_reads": 3477,
+    "parallel_nvme_reads": 2370,
+    "original_gpu_util_pct": 78,
+    "parallel_gpu_util_pct": 88
+   },
+   {
+    "text": "words",
+    "row_cache": "cold",
+    "prompt_tokens": 36587,
+    "original_s": 53.61,
+    "parallel_s": 7.14,
+    "original_tok_s": 682,
+    "parallel_tok_s": 5125,
+    "speedup": 7.51,
+    "original_nvme_reads": 3391679,
+    "parallel_nvme_reads": 1835890,
+    "original_gpu_util_pct": 0,
+    "parallel_gpu_util_pct": 48
+   },
+   {
+    "text": "words",
+    "row_cache": "warm",
+    "prompt_tokens": 36587,
+    "original_s": 3.93,
+    "parallel_s": 3.78,
+    "original_tok_s": 9306,
+    "parallel_tok_s": 9672,
+    "speedup": 1.04,
+    "original_nvme_reads": 17458,
+    "parallel_nvme_reads": 9727,
+    "original_gpu_util_pct": 80,
+    "parallel_gpu_util_pct": 85
+   },
+   {
+    "text": "code3",
+    "row_cache": "cold",
+    "prompt_tokens": 100098,
+    "original_s": 95.19,
+    "parallel_s": 13.77,
+    "original_tok_s": 1052,
+    "parallel_tok_s": 7269,
+    "speedup": 6.91,
+    "original_nvme_reads": 4513463,
+    "parallel_nvme_reads": 2293569,
+    "original_gpu_util_pct": 25,
+    "parallel_gpu_util_pct": 72
+   },
+   {
+    "text": "code3",
+    "row_cache": "warm",
+    "prompt_tokens": 100098,
+    "original_s": 11.69,
+    "parallel_s": 11.25,
+    "original_tok_s": 8562,
+    "parallel_tok_s": 8897,
+    "speedup": 1.04,
+    "original_nvme_reads": 38203,
+    "parallel_nvme_reads": 22994,
+    "original_gpu_util_pct": 84,
+    "parallel_gpu_util_pct": 89
+   }
+  ]
+ },
+ "decode_check": {
+  "protocol": "three fixed prompts, temperature 0, max_tokens 400, each sent twice; single stream",
+  "original": {
+   "prose": [
+    71.6,
+    73.0
+   ],
+   "code": [
+    165.6,
+    203.0
+   ],
+   "explain": [
+    119.3,
+    117.8
+   ]
+  },
+  "parallel": {
+   "prose": [
+    95.0,
+    96.2
+   ],
+   "code": [
+    213.8,
+    208.3
+   ],
+   "explain": [
+    135.8,
+    145.3
+   ]
+  },
+  "note": "indicative only: greedy texts differ between repeats in both arms, so DSpark acceptance differs"
+ },
+ "logprob_check": {
+  "protocol": "two prompts, temperature 0, prefix cache flushed before each of two identical requests; max |logprob difference| over the first six tokens",
+  "engine_is_bitwise_deterministic": false,
+  "within_original": {
+   "short": 0.02026662975549698,
+   "code": 0.03491377830505371
+  },
+  "within_parallel": {
+   "short": 0.019791409373283386,
+   "code": 0.10447084903717041
+  },
+  "original_vs_parallel": {
+   "short": 0.02083573490381241,
+   "code": 0.1302052140235901
+  },
+  "note": "cross-arm differences are the same order of magnitude as each arm's own run-to-run differences (two samples per prompt, so not a tolerance test); equality of the looked-up rows is established by the byte-parity checks"
+ },
+ "smoke": "boot.py smoke (arithmetic, JSON schema, tool round trip, image) passed before Ready in both arms; decode and verification CUDA graphs replay the new host callback"
+}

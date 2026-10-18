@@ -1,6 +1,6 @@
 # DeepSeek-V4.1-Flash on 4 × RTX PRO 6000
 
-Run DeepSeek-V4.1-Flash on one Linux machine with **4 × 96 GB RTX PRO 6000 Blackwell GPUs, 128 GB DDR5, and local NVMe**. Compute weights and model-native compressed KV stay on the GPUs. Native FP8 Engram rows use a bounded DDR5 cache, with exact NVMe reads on misses. **DSpark is enabled. No second machine is required.**
+Run DeepSeek-V4.1-Flash on one Linux machine with **4 × 96 GB RTX PRO 6000 Blackwell GPUs, 128 GB DDR5, and local NVMe**. Compute weights and model-native compressed KV stay on the GPUs. Native FP8 Engram rows use a bounded DDR5 cache, with exact parallel NVMe reads on misses. **DSpark is enabled. No second machine is required.**
 
 This repository contains an end-to-end Docker launcher and measured inference results. It is still experimental: successful loading, measured speed, populated context capacity, and feature correctness are separate milestones.
 
@@ -58,6 +58,8 @@ curl http://127.0.0.1:8010/v1/chat/completions \
 |---|---:|---:|
 | `OFFLOAD_MODE` | `nvme` | `nvme` |
 | `DSV41_CACHE_GIB` | 64 | 64 |
+| `DSV41_ENGRAM_IO_DEPTH` | 64 | 64 |
+| `DSV41_ENGRAM_RESIDENT_SCALES` | 1 | 1 |
 | `CONTEXT_LENGTH` | 409600 | 524288 |
 | `MEMORY_FRACTION` | 0.85 | 0.95 |
 | `MAX_RUNNING_REQUESTS` | 8 | 8 |
@@ -83,6 +85,8 @@ docker compose up --build -d
 ```
 
 A 64 GiB cache budget is bounded capacity, not a promise that every byte is populated or locked. The native Engram tables occupy about 189 GiB, so they cannot reside entirely in this 128 GB host. Cache misses retrieve the original row and scale bytes; model hashing, gating, projections and tensor-parallel reduction are preserved.
+
+Each lookup deduplicates its misses and reads them in parallel with Linux native AIO on the `O_DIRECT` descriptor, with up to `DSV41_ENGRAM_IO_DEPTH` reads in flight per lookup (`1` reads one row at a time). Docker's default seccomp profile permits native AIO, so this needs no syscall policy change and no extra package, unlike `io_uring`. When a rank's scale rows fit in half its cache budget (about 0.72 GiB of the 8 GiB per layer per rank at the default 64 GiB), they are read once at start and held inside that budget, so a miss costs one 4 KiB read instead of two. `DSV41_ENGRAM_RESIDENT_SCALES=0` keeps them on NVMe.
 
 `OFFLOAD_MODE=ram` is an optional **unqualified full-model mode for larger-memory hosts**. It prefaults and locks the native tables, requires roughly 189 GiB plus at least 24 GiB available headroom, and aborts if `mlock` fails. Shared mappings avoid four physical copies. It is not the recommended mode for a 128 GB host.
 
@@ -187,6 +191,25 @@ Host telemetry is being recorded. Swappiness was 180, with some inference-proces
 
 The next storage candidate reuses the [upstream B12x reader](https://github.com/local-inference-lab/b12x/blob/01ac763bef7503d934c4c2874bfd005799ca24a1/b12x/loader/_ple_reader.c). Its configurable native byte reader can represent the checkpoint's 256-byte FP8 rows plus 8-byte E8M0 scale rows. The high-level PLE wrapper has different quantization and graph-capture contracts, so it cannot simply replace DeepSeek's embedding module. Integration must retain native row/scaling semantics, the DDR5 cache and DSpark graph replay, then pass parity and matched inference sweeps.
 
+### Cold Engram rows: parallel direct reads
+
+The sweep above repeats synthetic reference text, so after the first chunk nearly every Engram row is a DDR5 cache hit. New text behaves differently. Each token looks up 48 rows (2 layers × 3 n-gram orders × 8 hash heads). About half of a new code prompt's rows, and nearly all of a random-word prompt's, are not cached yet, and a larger cache cannot help with rows that have never been read. Each miss used to be two serial 4 KiB direct reads inside the CUDA host callback, so the four ranks kept four reads in flight (about 67k reads/s) while the GPUs waited. The same NVMe sustains 0.8–1.3M random 4 KiB reads/s with 16–64 reads in flight per process.
+
+Misses are now deduplicated and read in parallel, and scale rows stay resident (see [Configuration](#3-configuration)). Measured on 4 × RTX PRO 6000 at 350 W with a Samsung 990 PRO 2TB and 1,048,576 context. Each arm was freshly restarted and given the same request sequence. [Receipt](results/engram-parallel-reads.json).
+
+| Prompt | Engram rows | Before | After | Speedup |
+|---|---|---:|---:|---:|
+| 25.7k tokens of new code | cold | 999 tok/s | 3,925 tok/s | 3.9× |
+| 24.8k tokens of different code | cold | 1,039 tok/s | 5,205 tok/s | 5.0× |
+| 36.6k random words | cold | 682 tok/s | 5,125 tok/s | 7.5× |
+| 100k tokens of new code | cold | 1,052 tok/s | 7,269 tok/s | 6.9× |
+| The same four prompts again | warm | 8,562–9,306 tok/s | 8,897–9,672 tok/s | 1.0× |
+
+- **GPU utilization:** during cold prefill it rose from 0–25% to 44–72%. The first cold prompt after a restart is the slowest, because new rows also land in untouched cache pages.
+- **Byte parity:** 11 fixture cases (including `OFFLOAD_MODE=ram`), plus 41,016 checkpoint rows across both Engram layers and all four TP ranks, cold and warm.
+- **Lookup speed:** a single-process cold lookup of about 2,100 missing rows per store took 200–254 ms before and 8–9 ms after.
+- **Decode:** in a three-prompt greedy check, single-stream decode was also faster (prose 72 → 95 tok/s). The engine is not bitwise deterministic run to run, so treat decode as indicative.
+
 ## 5. Experiment history
 
 ### Capacity and runtime experiments
@@ -210,6 +233,7 @@ The next storage candidate reuses the [upstream B12x reader](https://github.com/
 | Assembled B12x adapter initialization | Native bytes and warm-cache behavior passed through the patched adapter constructor | [Receipt](results/b12x-uring-adapter-init.json); GPU callback replay passed below; full inference remains pending |
 | Actual-checkpoint B12x reader | 8,192 row checks passed across both Engram layers and all four TP ranks | [Receipt](results/b12x-uring-checkpoint-parity.json); original FP8 values and E8M0 scales versus independent reads |
 | B12x GPU callback and graph replay | 320 graph replays and 994,560 synthetic row checks passed | [Receipt](results/b12x-uring-graph-replay.json); initial attempt hit OOM beside the occupied baseline, isolated rerun passed. Full-model quality and speed remain pending |
+| Parallel native-AIO misses with resident scales | New-text cold prefill 3.9–7.5× faster; warm unchanged; 41,016 checkpoint rows byte-identical | Default (`DSV41_ENGRAM_IO_DEPTH=64`); no io_uring, extra package or seccomp change; [receipt](results/engram-parallel-reads.json) |
 | Native fully resident DDR5 | About 189 GiB needed before runtime headroom | Does not fit 128 GB host; not tested as a fabricated “RAM-only” result |
 
 ### Historical remote comparison — stopped
@@ -338,7 +362,10 @@ CPU adapter checks:
 ```bash
 docker compose run --rm --entrypoint python3 deepseek /opt/dsv41/tests/test_row_store.py
 docker compose run --rm -e OFFLOAD_MODE=ram --entrypoint python3 deepseek /opt/dsv41/tests/test_row_store.py
+docker compose run --rm --entrypoint python3 deepseek /opt/dsv41/tests/test_row_store_checkpoint.py
 ```
+
+The checkpoint check compares cold and warm lookups for both Engram layers and all four TP ranks against plain reads of the shards.
 
 Shutdown preserves checkpoint, state and kernel caches. Restore an earlier service using its saved container configuration; a complete rollback exercise for the final candidate is still pending.
 
