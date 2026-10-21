@@ -91,8 +91,13 @@ def smoke():
         content='What is 19 + 23? Reply only with the number.')]),timeout=300)
     choice = result['choices'][0]
     assert choice['message']['content'].strip() == '42' and choice['finish_reason'] == 'stop', result
-    save('smoke.json',result)
-    print('Fresh inference passed: 19 + 23 = 42',flush=True)
+    long_ctx = ('Context note: verify SM120 sparse-MLA prefill across the 64-token kernel boundary. ' * 6).strip()
+    long_res = request('/v1/chat/completions',dict(model='deepseek-v4.1-flash',temperature=0,
+        chat_template_kwargs={'thinking':False},messages=[dict(role='user',
+        content=f'{long_ctx}\n\nIgnore the note above. What is 19 + 23? Reply only with the number.')]),timeout=300)
+    assert long_res['usage']['prompt_tokens'] > 64 and long_res['choices'][0]['message']['content'].strip() == '42', long_res
+    save('smoke.json',{'short':result,'long_prefill':long_res})
+    print('Fresh inference passed: 19 + 23 = 42 (short and >64-token prefill)',flush=True)
     common = dict(model='deepseek-v4.1-flash',temperature=0,
                   chat_template_kwargs={'thinking':False})
     structured = request('/v1/chat/completions',dict(common,

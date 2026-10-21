@@ -231,6 +231,9 @@ def _flash_mla_sm120_prefill(
     kv_u8 = k_cache.view(torch.uint8) if k_cache.dtype != torch.uint8 else k_cache
     src_pbs = k_cache.shape[1] if k_cache.ndim >= 3 else _PBS_SRC
     idx = indices.squeeze(1) if indices.dim() == 3 else indices
+    if topk_length is not None:
+        ar = torch.arange(idx.shape[-1], device=idx.device)
+        idx = torch.where(ar[None, :] < topk_length.view(-1, 1), idx, torch.full_like(idx, -1))
     kv_64 = (
         _split_kv_pages_to_64(kv_u8, src_pbs, touched_indices=idx)
         if src_pbs != _PBS_DST
@@ -246,6 +249,9 @@ def _flash_mla_sm120_prefill(
         if extra_indices is not None and extra_indices.dim() == 3
         else extra_indices
     )
+    if extra_idx is not None and extra_topk_length is not None:
+        ar = torch.arange(extra_idx.shape[-1], device=extra_idx.device)
+        extra_idx = torch.where(ar[None, :] < extra_topk_length.view(-1, 1), extra_idx, torch.full_like(extra_idx, -1))
     # V4.1 ratio-1/2 sources use 256/128-token pages. The prefill
     # specialization needs 64-token pages for both sources, with independent
     # scratch buffers so converting the extra source cannot overwrite SWA.
